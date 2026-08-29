@@ -10,6 +10,18 @@ import os
 import sys
 import winreg
 import struct
+from pathlib import Path
+
+def resource_path(relative_path):
+    """Return asset path for source mode and PyInstaller one-file mode."""
+    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+        base = Path(sys._MEIPASS)
+    else:
+        # src/yg98_cross_ripple.py -> repo root
+        base = Path(__file__).resolve().parent.parent
+    return str(base / relative_path)
+
+ICON_PATH = resource_path(Path("assets") / "YG98CrossRipple.ico")
 
 VID = 0x05AC
 PID = 0x024F
@@ -844,6 +856,9 @@ NIF_MESSAGE = 0x00000001
 NIF_ICON = 0x00000002
 NIF_TIP = 0x00000004
 IDI_APPLICATION = 32512
+IMAGE_ICON = 1
+LR_LOADFROMFILE = 0x0010
+LR_DEFAULTSIZE = 0x0040
 SW_SHOWNORMAL = 1
 
 class NOTIFYICONDATAW(ctypes.Structure):
@@ -903,6 +918,12 @@ user32.DefWindowProcW.restype = LRESULT
 
 user32.LoadIconW.argtypes = [HINSTANCE, wt.LPCWSTR]
 user32.LoadIconW.restype = HICON
+
+user32.LoadImageW.argtypes = [
+    HINSTANCE, wt.LPCWSTR, wt.UINT,
+    ctypes.c_int, ctypes.c_int, wt.UINT
+]
+user32.LoadImageW.restype = wt.HANDLE
 
 user32.CreatePopupMenu.argtypes = []
 user32.CreatePopupMenu.restype = HMENU
@@ -1017,7 +1038,17 @@ class NativeTray:
             self.ready.set()
             return
 
-        icon = user32.LoadIconW(None, ctypes.cast(ctypes.c_void_p(IDI_APPLICATION), wt.LPCWSTR))
+        icon = None
+        if os.path.exists(ICON_PATH):
+            icon = user32.LoadImageW(
+                None, ICON_PATH, IMAGE_ICON, 0, 0,
+                LR_LOADFROMFILE | LR_DEFAULTSIZE
+            )
+        if not icon:
+            icon = user32.LoadIconW(
+                None,
+                ctypes.cast(ctypes.c_void_p(IDI_APPLICATION), wt.LPCWSTR)
+            )
         nid = NOTIFYICONDATAW()
         nid.cbSize = ctypes.sizeof(NOTIFYICONDATAW)
         nid.hWnd = self.hwnd
@@ -1046,7 +1077,12 @@ def make_gui(device_info=None):
     global current_profile
 
     root = tk.Tk()
-    root.title("YG98 十字漣漪控制器 v3.1")
+    try:
+        if os.path.exists(ICON_PATH):
+            root.iconbitmap(default=ICON_PATH)
+    except Exception:
+        pass
+    root.title("YG98 十字漣漪控制器 v3.2")
     root.geometry("470x610")
     root.resizable(False, False)
 
@@ -1251,6 +1287,11 @@ def main():
         # 一般手動啟動要看到錯誤；開機背景啟動則安靜退出。
         if "--startup" not in sys.argv:
             root = tk.Tk()
+            try:
+                if os.path.exists(ICON_PATH):
+                    root.iconbitmap(default=ICON_PATH)
+            except Exception:
+                pass
             root.withdraw()
             messagebox.showerror(
                 "YG98 十字漣漪",

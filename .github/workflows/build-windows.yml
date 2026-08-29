@@ -28,7 +28,7 @@ jobs:
 
       - name: Build EXE
         run: |
-          pyinstaller --noconfirm --clean --onefile --windowed --name YG98CrossRipple --hidden-import=hid src/yg98_cross_ripple.py
+          pyinstaller --noconfirm --clean --onefile --windowed --name YG98CrossRipple --icon assets/YG98CrossRipple.ico --add-data "assets/YG98CrossRipple.ico;assets" --hidden-import=hid src/yg98_cross_ripple.py
 
       - name: Upload EXE artifact
         uses: actions/upload-artifact@v4

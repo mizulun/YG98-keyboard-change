@@ -10,6 +10,8 @@ py -m pip install --upgrade pyinstaller
 echo [2/3] Building YG98CrossRipple.exe...
 py -m PyInstaller --noconfirm --clean --onefile --windowed ^
   --name YG98CrossRipple ^
+  --icon assets\YG98CrossRipple.ico ^
+  --add-data "assets\YG98CrossRipple.ico;assets" ^
   --hidden-import=hid ^
   src\yg98_cross_ripple.py
 
