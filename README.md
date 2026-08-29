@@ -68,3 +68,10 @@ This is an unofficial community project and is not affiliated with the keyboard 
 ## License
 
 No open-source license has been selected yet.
+
+## 預計更新
+ 1. 亮度
+ 2. icon
+ 3. 加入別種特效(擴散:可自定義顏色)
+ 4. 目前每組合僅雙色，後續預計新增每組合可自由選要幾種顏色
+ 5. 2.4G、Bluetooth
