@@ -6,6 +6,7 @@ import threading
 import tkinter as tk
 from tkinter import colorchooser, simpledialog, messagebox
 import json
+import math
 import os
 import sys
 import winreg
@@ -22,6 +23,7 @@ def resource_path(relative_path):
     return str(base / relative_path)
 
 ICON_PATH = resource_path(Path("assets") / "YG98CrossRipple.ico")
+APP_VERSION = "v1.1.0"
 
 VID = 0x05AC
 PID = 0x024F
@@ -39,7 +41,13 @@ DT = 1.0 / FPS
 
 # GUI 可即時調整
 settings_lock = threading.Lock()
+EFFECT_LABELS = {
+    "cross_ripple": "十字漣漪",
+    "radial_ripple": "圓形漣漪",
+    "follower": "跟隨",
+}
 settings = {
+    "effect": "cross_ripple",
     "colors": [
         {"rgb": (255, 70, 170), "enabled": True},   # 粉紅
         {"rgb": (145, 55, 255), "enabled": True},   # 紫
@@ -54,6 +62,8 @@ running = True
 ripples = []
 lock = threading.Lock()
 reconnect_device = threading.Event()
+pressed_leds = set()
+follower_color_cursor = 0
 
 # ------------------------------------------------------------
 # YG98 真實 6 x 21 LED matrix
@@ -187,6 +197,67 @@ ACTIVE_LEDS = set(SCAN_TO_LED.values()) | {114}
 # 不再對整個鍵盤套 row stagger，避免所有往上軌跡一起變成右上。
 POS = {idx: (idx // COLS, idx % COLS) for idx in ACTIVE_LEDS}
 
+# Approximate physical key-cap center coordinates in 1u key units.  Unlike the
+# firmware's compact 6x21 matrix, these coordinates retain row stagger, wide
+# key centers, and the gaps before the navigation/numpad blocks so Euclidean
+# distance produces a visually round wave on the real keyboard.
+PHYSICAL_POS = {
+    # Function row
+    0: (0.5, 0.0),
+    1: (2.0, 0.0), 2: (3.0, 0.0), 3: (4.0, 0.0), 4: (5.0, 0.0),
+    5: (6.5, 0.0), 6: (7.5, 0.0), 7: (8.5, 0.0), 8: (9.5, 0.0),
+    9: (11.0, 0.0), 10: (12.0, 0.0), 11: (13.0, 0.0), 12: (14.0, 0.0),
+    13: (15.5, 0.0), 14: (16.5, 0.0), 15: (17.5, 0.0),
+    16: (18.5, 0.0), 17: (19.5, 0.0),
+
+    # Number row
+    21: (0.5, 1.5), 22: (1.5, 1.5), 23: (2.5, 1.5), 24: (3.5, 1.5),
+    25: (4.5, 1.5), 26: (5.5, 1.5), 27: (6.5, 1.5), 28: (7.5, 1.5),
+    29: (8.5, 1.5), 30: (9.5, 1.5), 31: (10.5, 1.5), 32: (11.5, 1.5),
+    33: (12.5, 1.5), 34: (14.0, 1.5),
+    35: (16.5, 1.5), 36: (17.5, 1.5), 37: (18.5, 1.5), 38: (19.5, 1.5),
+
+    # QWERTY row
+    42: (0.75, 2.5), 43: (2.0, 2.5), 44: (3.0, 2.5), 45: (4.0, 2.5),
+    46: (5.0, 2.5), 47: (6.0, 2.5), 48: (7.0, 2.5), 49: (8.0, 2.5),
+    50: (9.0, 2.5), 51: (10.0, 2.5), 52: (11.0, 2.5), 53: (12.0, 2.5),
+    54: (13.0, 2.5), 55: (14.25, 2.5),
+    56: (16.5, 2.5), 57: (17.5, 2.5), 58: (18.5, 2.5), 59: (19.5, 2.5),
+
+    # Home row
+    63: (0.875, 3.5), 64: (2.25, 3.5), 65: (3.25, 3.5), 66: (4.25, 3.5),
+    67: (5.25, 3.5), 68: (6.25, 3.5), 69: (7.25, 3.5), 70: (8.25, 3.5),
+    71: (9.25, 3.5), 72: (10.25, 3.5), 73: (11.25, 3.5), 74: (12.25, 3.5),
+    76: (14.125, 3.5),
+    77: (16.5, 3.5), 78: (17.5, 3.5), 79: (18.5, 3.5),
+
+    # Shift row
+    84: (1.125, 4.5), 86: (2.75, 4.5), 87: (3.75, 4.5), 88: (4.75, 4.5),
+    89: (5.75, 4.5), 90: (6.75, 4.5), 91: (7.75, 4.5), 92: (8.75, 4.5),
+    93: (9.75, 4.5), 94: (10.75, 4.5), 95: (11.75, 4.5), 96: (13.625, 4.5),
+    97: (15.5, 4.5), 98: (16.5, 4.5), 99: (17.5, 4.5),
+    100: (18.5, 4.5), 101: (19.5, 4.5),
+
+    # Bottom row
+    105: (0.625, 5.5), 106: (1.75, 5.5), 107: (2.875, 5.5),
+    110: (7.0, 5.5), 113: (11.125, 5.5), 114: (12.25, 5.5),
+    115: (13.375, 5.5), 117: (15.5, 5.5), 118: (16.5, 5.5),
+    119: (17.5, 5.5), 120: (18.5, 5.5), 121: (19.5, 5.5),
+}
+
+
+def radial_distances(center, positions=PHYSICAL_POS):
+    if center not in positions:
+        return {}
+    x0, y0 = positions[center]
+    return {
+        idx: math.hypot(x - x0, y - y0)
+        for idx, (x, y) in positions.items()
+    }
+
+
+RADIAL_DIST = {idx: radial_distances(idx) for idx in PHYSICAL_POS}
+
 
 APP_DIR = os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), "YG98CrossRipple")
 CONFIG_FILE = os.path.join(APP_DIR, "settings.json")
@@ -195,6 +266,7 @@ RUN_NAME = "YG98CrossRipple"
 
 DEFAULT_PROFILES = {
     "粉紅 + 紫": {
+        "effect": "cross_ripple",
         "colors": [
             {"rgb": [255, 70, 170], "enabled": True},
             {"rgb": [145, 55, 255], "enabled": True},
@@ -205,6 +277,7 @@ DEFAULT_PROFILES = {
         "gradient_strength": 0.72,
     },
     "藍 + 綠": {
+        "effect": "cross_ripple",
         "colors": [
             {"rgb": [45, 130, 255], "enabled": True},
             {"rgb": [40, 230, 130], "enabled": True},
@@ -215,6 +288,7 @@ DEFAULT_PROFILES = {
         "gradient_strength": 0.72,
     },
     "紅 + 橘": {
+        "effect": "cross_ripple",
         "colors": [
             {"rgb": [255, 45, 55], "enabled": True},
             {"rgb": [255, 145, 25], "enabled": True},
@@ -271,6 +345,7 @@ def normalize_profile(data):
             return default
 
     return {
+        "effect": data.get("effect") if data.get("effect") in EFFECT_LABELS else "cross_ripple",
         "colors": colors,
         "brightness": number("brightness", 100.0, 0.0, 100.0),
         "speed": number("speed", 8.5, 4.0, 14.0),
@@ -282,6 +357,7 @@ def normalize_profile(data):
 def profile_from_settings():
     with settings_lock:
         return {
+            "effect": settings["effect"],
             "colors": [
                 {"rgb": list(item["rgb"]), "enabled": bool(item["enabled"])}
                 for item in settings["colors"]
@@ -296,6 +372,7 @@ def profile_from_settings():
 def apply_profile_data(data):
     data = normalize_profile(data)
     with settings_lock:
+        settings["effect"] = data["effect"]
         settings["colors"] = [
             {"rgb": tuple(item["rgb"]), "enabled": item["enabled"]}
             for item in data["colors"]
@@ -682,7 +759,7 @@ apply_special_vertical(113, [93, 71, 50, 37, 7])
 # 9  = F9
 apply_special_vertical(115, [95, 73, 52, 31, 9])
 
-def brightness(d, radius, age, life):
+def brightness(d, radius, age, life, fade_start=None):
     delta = radius - d
     if delta < -0.8:
         return 0
@@ -693,12 +770,22 @@ def brightness(d, radius, age, life):
     else:
         shape = 0.0
 
-    fade_start = min(0.72, life * 0.68)
+    if fade_start is None:
+        fade_start = min(0.72, life * 0.68)
     fade = 1.0
     if age > fade_start:
         denom = max(0.001, life - fade_start)
         fade = max(0.0, (life - age) / denom)
     return int(255 * shape * fade)
+
+
+def ripple_timing(effect, center, speed, life):
+    """Return (total lifetime, fade start) while ensuring radial waves reach every key."""
+    if effect != "radial_ripple":
+        return life, None
+    dist_map = RADIAL_DIST.get(center, {})
+    travel_time = max(dist_map.values(), default=0.0) / max(0.001, speed)
+    return travel_time + life, travel_time
 
 
 def mix_color(a, b, t):
@@ -734,6 +821,29 @@ def scale_rgb(rgb, brightness_percent):
 def enabled_colors(color_items):
     return [tuple(item["rgb"]) for item in color_items if item.get("enabled", True)]
 
+
+def cycle_color(colors, cursor):
+    if not colors:
+        return (0, 0, 0), 0
+    index = cursor % len(colors)
+    return tuple(colors[index]), (index + 1) % len(colors)
+
+
+def follower_power(age, life):
+    """Smoothly fade from full power at key-down to zero at the configured lifetime."""
+    if life <= 0 or age >= life:
+        return 0
+    x = max(0.0, age / life)
+    smooth = 1.0 - (x * x * (3.0 - 2.0 * x))
+    return int(255 * smooth)
+
+
+def clear_active_animations():
+    global follower_color_cursor
+    with lock:
+        ripples.clear()
+        follower_color_cursor = 0
+
 def renderer(dev):
     global running
     nxt = time.perf_counter()
@@ -768,6 +878,7 @@ def renderer(dev):
             now = time.perf_counter()
 
             with settings_lock:
+                effect = settings["effect"]
                 active_colors = enabled_colors(settings["colors"])
                 brightness_percent = settings["brightness"]
                 speed = settings["speed"]
@@ -775,7 +886,14 @@ def renderer(dev):
                 strength = settings["gradient_strength"]
 
             with lock:
-                ripples[:] = [r for r in ripples if now - r[1] < life]
+                ripples[:] = [
+                    ripple for ripple in ripples
+                    if now - ripple["time"] < (
+                        life if effect == "follower" else ripple_timing(
+                            effect, ripple["center"], speed, life
+                        )[0]
+                    )
+                ]
                 active = list(ripples)
 
             # 每顆 LED 保存目前最強 ripple 的亮度與 RGB。
@@ -783,14 +901,40 @@ def renderer(dev):
             colors = {}
             powers = {}
 
-            for center, t0 in active:
+            for event in active:
+                center = event["center"]
+                t0 = event["time"]
                 age = now - t0
+
+                if effect == "follower":
+                    v = follower_power(age, life)
+                    if v <= 0:
+                        continue
+                    base_rgb = event.get("color") or active_colors[0]
+                    rgb = scale_rgb(
+                        tuple(int(channel * v / 255.0) for channel in base_rgb),
+                        brightness_percent,
+                    )
+                    if v > powers.get(center, -1):
+                        powers[center] = v
+                        colors[center] = rgb
+                    continue
+
                 radius = age * speed
-                dist_map = DIST.get(center, {})
+                dist_map = (
+                    RADIAL_DIST.get(center, {})
+                    if effect == "radial_ripple"
+                    else DIST.get(center, {})
+                )
                 max_distance = max(dist_map.values(), default=1.0)
+                total_life, fade_start = ripple_timing(
+                    effect, center, speed, life
+                )
 
                 for idx, d in dist_map.items():
-                    v = brightness(d, radius, age, life)
+                    v = brightness(
+                        d, radius, age, total_life, fade_start=fade_start
+                    )
                     if v <= 0:
                         continue
 
@@ -845,7 +989,9 @@ kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
 
 WH_KEYBOARD_LL = 13
 WM_KEYDOWN = 0x0100
+WM_KEYUP = 0x0101
 WM_SYSKEYDOWN = 0x0104
+WM_SYSKEYUP = 0x0105
 LLKHF_EXTENDED = 0x01
 
 ULONG_PTR = wt.WPARAM
@@ -913,35 +1059,68 @@ user32.GetAsyncKeyState.restype = ctypes.c_short
 
 ctrl_down = False
 
-def hook_proc(nCode, wParam, lParam):
-    global running, ctrl_down
 
-    if nCode >= 0 and wParam in (WM_KEYDOWN, WM_SYSKEYDOWN):
+def led_from_hook_info(info):
+    scan = int(info.scanCode)
+    ext = 1 if (info.flags & LLKHF_EXTENDED) else 0
+    vk = int(info.vkCode)
+    if vk == 0xA1:          # VK_RSHIFT
+        return 96
+    if vk == 0xA5:          # VK_RMENU / Right Alt (AltGr)
+        return 113
+    return SCAN_TO_LED.get((scan, ext))
+
+
+def add_trigger_event(events, event, effect, limit=24):
+    if effect == "follower":
+        events[:] = [item for item in events if item["center"] != event["center"]]
+    events.append(event)
+    if len(events) > limit:
+        del events[:-limit]
+
+
+def hook_proc(nCode, wParam, lParam):
+    global running, ctrl_down, follower_color_cursor
+
+    if nCode >= 0 and wParam in (WM_KEYDOWN, WM_SYSKEYDOWN, WM_KEYUP, WM_SYSKEYUP):
         info = ctypes.cast(lParam, ctypes.POINTER(KBDLLHOOKSTRUCT)).contents
         scan = int(info.scanCode)
-        ext = 1 if (info.flags & LLKHF_EXTENDED) else 0
-        vk = int(info.vkCode)
+        is_keydown = wParam in (WM_KEYDOWN, WM_SYSKEYDOWN)
 
         # Ctrl + F12 = 結束；F12 單按仍然可以觸發漣漪
-        if scan == 0x58 and (user32.GetAsyncKeyState(0x11) & 0x8000):
+        if is_keydown and scan == 0x58 and (user32.GetAsyncKeyState(0x11) & 0x8000):
             running = False
             user32.PostQuitMessage(0)
             return user32.CallNextHookEx(None, nCode, wParam, lParam)
 
-        # 某些鍵盤/Windows 組合對右側修飾鍵的 scan/ext 回報不一致，
-        # 所以右 Shift / 右 Alt 再用 vkCode 做一層強制辨識。
-        if vk == 0xA1:          # VK_RSHIFT
-            idx = 96
-        elif vk == 0xA5:        # VK_RMENU / Right Alt (AltGr)
-            idx = 113
-        else:
-            idx = SCAN_TO_LED.get((scan, ext))
+        idx = led_from_hook_info(info)
 
         if idx is not None:
+            if not is_keydown:
+                with lock:
+                    pressed_leds.discard(idx)
+                return user32.CallNextHookEx(None, nCode, wParam, lParam)
+
+            with settings_lock:
+                effect = settings["effect"]
+                colors = enabled_colors(settings["colors"])
+
             with lock:
-                ripples.append((idx, time.perf_counter()))
-                if len(ripples) > 24:
-                    del ripples[:-24]
+                repeated = idx in pressed_leds
+                pressed_leds.add(idx)
+                if effect == "follower" and repeated:
+                    return user32.CallNextHookEx(None, nCode, wParam, lParam)
+
+                event_color = None
+                if effect == "follower":
+                    event_color, follower_color_cursor = cycle_color(
+                        colors, follower_color_cursor
+                    )
+                add_trigger_event(
+                    ripples,
+                    {"center": idx, "time": time.perf_counter(), "color": event_color},
+                    effect,
+                )
 
     return user32.CallNextHookEx(None, nCode, wParam, lParam)
 
@@ -1273,19 +1452,73 @@ def make_gui(device_info=None):
     except Exception:
         pass
     root.title("YG98 燈效控制器")
-    root.geometry("500x750")
-    root.resizable(False, False)
+    root.geometry("500x810")
+    root.minsize(470, 700)
+    root.resizable(True, True)
 
-    title = tk.Label(root, text="YG98 燈效控制器", font=("Microsoft JhengHei UI", 18, "bold"))
+    def show_help():
+        messagebox.showinfo(
+            "使用說明",
+            "所有修改會自動儲存；下次啟動直接載入最後使用的組合。\n\n"
+            "雙擊圖示可再次開啟｜Ctrl + F12 完全結束",
+            parent=root,
+        )
+
+    def show_version():
+        messagebox.showinfo(
+            "版本資訊",
+            f"YG98 燈效控制器\n版本 {APP_VERSION}",
+            parent=root,
+        )
+
+    menu_bar = tk.Menu(root)
+    help_menu = tk.Menu(menu_bar, tearoff=False)
+    help_menu.add_command(label="使用說明", command=show_help)
+    help_menu.add_separator()
+    help_menu.add_command(label=f"版本資訊（{APP_VERSION}）", command=show_version)
+    menu_bar.add_cascade(label="說明", menu=help_menu)
+    root.configure(menu=menu_bar)
+
+    page_canvas = tk.Canvas(root, highlightthickness=0)
+    page_scrollbar = tk.Scrollbar(root, orient="vertical", command=page_canvas.yview)
+    content = tk.Frame(page_canvas)
+    content_window = page_canvas.create_window((0, 0), window=content, anchor="nw")
+    page_canvas.configure(yscrollcommand=page_scrollbar.set)
+    page_scrollbar.pack(side="right", fill="y")
+    page_canvas.pack(side="left", fill="both", expand=True)
+    content.bind(
+        "<Configure>",
+        lambda _event: page_canvas.configure(scrollregion=page_canvas.bbox("all")),
+    )
+    page_canvas.bind(
+        "<Configure>",
+        lambda event: page_canvas.itemconfigure(content_window, width=event.width),
+    )
+
+    def scroll_page(event):
+        if event.delta:
+            page_canvas.yview_scroll(-int(event.delta / 120), "units")
+
+    root.bind_all("<MouseWheel>", scroll_page)
+    root._page_canvas = page_canvas
+
+    title = tk.Label(content, text="YG98 燈效控制器", font=("Microsoft JhengHei UI", 18, "bold"))
     title.pack(pady=(16, 3))
 
     mode_text = "RGB HID 已連線"
     if device_info:
         product = device_info.get("product_string") or "YG98/YG99"
         mode_text = f"{product}｜RGB HID 已連線"
-    tk.Label(root, text=mode_text, font=("Microsoft JhengHei UI", 9)).pack(pady=(0, 10))
+    tk.Label(content, text=mode_text, font=("Microsoft JhengHei UI", 9)).pack(pady=(0, 10))
 
-    profile_box = tk.LabelFrame(root, text="顏色組合", font=("Microsoft JhengHei UI", 10, "bold"))
+    effect_box = tk.LabelFrame(content, text="燈效", font=("Microsoft JhengHei UI", 10, "bold"))
+    effect_box.pack(fill="x", padx=24, pady=(0, 10))
+    effect_var = tk.StringVar(value=EFFECT_LABELS[settings["effect"]])
+    effect_menu = tk.OptionMenu(effect_box, effect_var, *EFFECT_LABELS.values())
+    effect_menu.config(width=24)
+    effect_menu.pack(anchor="w", padx=8, pady=8)
+
+    profile_box = tk.LabelFrame(content, text="顏色組合", font=("Microsoft JhengHei UI", 10, "bold"))
     profile_box.pack(fill="x", padx=24, pady=(0, 10))
 
     profile_var = tk.StringVar(value=current_profile)
@@ -1293,9 +1526,9 @@ def make_gui(device_info=None):
     profile_menu.config(width=24)
     profile_menu.pack(side="left", padx=8, pady=10)
 
-    color_box = tk.LabelFrame(root, text="漸變顏色（中心 → 外圈）",
+    color_box = tk.LabelFrame(content, text="燈效顏色（漣漪：中心 → 外圈｜跟隨：依序輪替）",
                               font=("Microsoft JhengHei UI", 10, "bold"))
-    color_box.pack(fill="x", padx=24)
+    color_box.pack(fill="both", expand=True, padx=24)
     color_canvas = tk.Canvas(color_box, height=180, highlightthickness=0)
     color_scrollbar = tk.Scrollbar(color_box, orient="vertical", command=color_canvas.yview)
     color_frame = tk.Frame(color_canvas)
@@ -1313,10 +1546,27 @@ def make_gui(device_info=None):
     )
 
     sliders = {}
+    slider_widgets = {}
 
     def persist_current_profile():
         profiles[current_profile] = profile_from_settings()
         save_config()
+
+    def select_effect(*_):
+        selected_label = effect_var.get()
+        effect = next(
+            (key for key, label in EFFECT_LABELS.items() if label == selected_label),
+            "cross_ripple",
+        )
+        with settings_lock:
+            changed = settings["effect"] != effect
+            settings["effect"] = effect
+        if changed:
+            clear_active_animations()
+        update_effect_controls(effect)
+        persist_current_profile()
+
+    effect_var.trace_add("write", select_effect)
 
     def rebuild_color_rows():
         for child in color_frame.winfo_children():
@@ -1413,16 +1663,20 @@ def make_gui(device_info=None):
 
     def refresh_controls():
         with settings_lock:
+            effect_label = EFFECT_LABELS[settings["effect"]]
             vals = {k: settings[k] for k in ("speed", "life", "gradient_strength", "brightness")}
+        effect_var.set(effect_label)
         rebuild_color_rows()
         for k, v in vals.items():
             sliders[k].set(v)
+        update_effect_controls(settings["effect"])
 
     def select_profile(*_):
         global current_profile
         name = profile_var.get()
         if name not in profiles:
             return
+        clear_active_animations()
         current_profile = name
         apply_profile_data(profiles[name])
         refresh_controls()
@@ -1430,9 +1684,9 @@ def make_gui(device_info=None):
 
     profile_var.trace_add("write", select_profile)
 
-    tk.Button(root, text="＋ 新增顏色", command=add_color, width=14).pack(pady=(6, 0))
+    tk.Button(content, text="＋ 新增顏色", command=add_color, width=14).pack(pady=(6, 0))
 
-    control = tk.Frame(root)
+    control = tk.Frame(content)
     control.pack(fill="x", padx=28, pady=(8, 0))
 
     def add_slider(label, key, lo, hi, resolution):
@@ -1448,12 +1702,20 @@ def make_gui(device_info=None):
                          length=255)
         scale.pack(side="right")
         sliders[key] = var
+        slider_widgets[key] = scale
 
         def update(_=None):
             with settings_lock:
                 settings[key] = float(var.get())
             persist_current_profile()
         scale.configure(command=update)
+
+    def update_effect_controls(effect):
+        state = "disabled" if effect == "follower" else "normal"
+        for key in ("speed", "gradient_strength"):
+            widget = slider_widgets.get(key)
+            if widget is not None:
+                widget.configure(state=state)
 
     add_slider("擴散速度", "speed", 4.0, 14.0, 0.5)
     add_slider("殘影時間", "life", 0.6, 1.8, 0.05)
@@ -1501,7 +1763,7 @@ def make_gui(device_info=None):
     tk.Button(buttons, text="＋ 新增", width=8, command=add_profile).pack(side="left", padx=2)
     tk.Button(buttons, text="刪除", width=7, command=delete_profile).pack(side="left", padx=2)
 
-    startup_frame = tk.LabelFrame(root, text="自動啟動", font=("Microsoft JhengHei UI", 10, "bold"))
+    startup_frame = tk.LabelFrame(content, text="自動啟動", font=("Microsoft JhengHei UI", 10, "bold"))
     startup_frame.pack(fill="x", padx=24, pady=(14, 8))
 
     startup_var = tk.BooleanVar(value=startup_enabled and is_startup_enabled())
@@ -1531,18 +1793,6 @@ def make_gui(device_info=None):
     #    text="自動啟動時會用 pythonw 背景執行，不需要開 PowerShell。",
     #    font=("Microsoft JhengHei UI", 9)
     #).pack(anchor="w", padx=12, pady=(0, 8))
-
-    tk.Label(
-        root,
-        text="所有修改會自動儲存；下次啟動直接載入最後使用的組合。",
-        font=("Microsoft JhengHei UI", 9)
-    ).pack(pady=(6, 2))
-
-    tk.Label(
-        root,
-        text="雙擊圖示可再次開啟｜Ctrl + F12 完全結束",
-        font=("Microsoft JhengHei UI", 9)
-    ).pack()
 
     def close_app():
         # 右上角 X 只隱藏 GUI；十字漣漪繼續在背景執行。

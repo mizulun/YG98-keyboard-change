@@ -2,13 +2,16 @@
 
 A Windows RGB utility for the YG98/YG99 3-mode keyboard family.
 
-The project implements a host-driven **cross-ripple RGB effect**: pressing a key creates a horizontal and vertical ripple. Each profile can contain any number of colors, blended from the pressed key toward the outer edge.
+The project implements host-driven **cross-ripple, radial-ripple, and follower RGB effects**. Each profile can select its effect and contain any number of colors.
 
 > Status: early public release. The current physical LED mapping and special ripple paths were calibrated on one YG98 3M keyboard. Other firmware revisions / layouts may require additional device profiles.
 
 ## Features
 
 - Multi-key cross ripples
+- Expanding radial ripples calibrated to the physical YG98 key layout
+- Per-profile effect selection in the existing GUI
+- Follower mode lights only the pressed key, cycles enabled colors, and fades smoothly
 - Smooth multi-color gradient from the pressed key to the outer edge
 - Add, remove, reorder, enable, or temporarily disable profile colors
 - Multiple color profiles
@@ -57,6 +60,15 @@ The current implementation uses a 520-byte HID Feature Report.
 - Red: `8 + index`
 - Green: `8 + 126 + index`
 - Blue: `8 + 252 + index`
+
+The keyboard manufacturer's built-in radial effect uses a one-time `07 02`
+Feature Report and is animated by the keyboard firmware. This application keeps
+using real-time `07 07` reports so radial ripples support the same arbitrary
+multi-color profiles and controls as cross ripples.
+
+The manufacturer's follower mode similarly uses firmware effect code `0x0B`.
+The host-rendered follower in this application instead cycles every enabled
+profile color and uses the configured brightness and lifetime.
 
 ## Contributing
 

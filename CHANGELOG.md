@@ -1,5 +1,16 @@
 # Changelog
 
+## Next (v1.1.0)
+
+- Added a per-profile effect selector to the existing GUI
+- Added host-rendered radial ripples with physical YG98 key coordinates
+- Reused multi-color, brightness, speed, lifetime, and gradient controls across effects
+- Added a follower effect with sequential colors and per-key smooth fade-out
+- Made the control window resizable with an expanding color list
+- Moved the persistent usage notes from the bottom of the window into a Help menu
+- Added the current application version to the Help menu
+- Added a right-side page scrollbar and mouse-wheel scrolling for compact windows
+
 ## v3.4 - Dynamic colors and brightness
 
 - Added per-profile 0–100% brightness control
