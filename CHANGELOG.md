@@ -1,6 +1,6 @@
 # Changelog
 
-## Next (v1.1.0)
+## v1.1.0 - 2026-08-30
 
 - Added a per-profile effect selector to the existing GUI
 - Added host-rendered radial ripples with physical YG98 key coordinates
