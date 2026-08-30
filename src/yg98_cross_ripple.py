@@ -53,6 +53,7 @@ settings = {
 running = True
 ripples = []
 lock = threading.Lock()
+reconnect_device = threading.Event()
 
 # ------------------------------------------------------------
 # YG98 真實 6 x 21 LED matrix
@@ -736,62 +737,106 @@ def enabled_colors(color_items):
 def renderer(dev):
     global running
     nxt = time.perf_counter()
+    current_dev = dev
 
-    while running:
-        now = time.perf_counter()
+    try:
+        while running:
+            if reconnect_device.is_set():
+                reconnect_device.clear()
+                if current_dev is not None:
+                    try:
+                        current_dev.close()
+                    except Exception:
+                        pass
+                    current_dev = None
 
-        with settings_lock:
-            active_colors = enabled_colors(settings["colors"])
-            brightness_percent = settings["brightness"]
-            speed = settings["speed"]
-            life = settings["life"]
-            strength = settings["gradient_strength"]
-
-        with lock:
-            ripples[:] = [r for r in ripples if now - r[1] < life]
-            active = list(ripples)
-
-        # 每顆 LED 保存目前最強 ripple 的亮度與 RGB。
-        # 多個 ripple 相遇時採「亮度最大者」，避免顏色相加變白。
-        colors = {}
-        powers = {}
-
-        for center, t0 in active:
-            age = now - t0
-            radius = age * speed
-            dist_map = DIST.get(center, {})
-            max_distance = max(dist_map.values(), default=1.0)
-
-            for idx, d in dist_map.items():
-                v = brightness(d, radius, age, life)
-                if v <= 0:
+            if current_dev is None:
+                try:
+                    current_dev, _ = open_dev()
+                    send_rgb(current_dev, {})
+                    nxt = time.perf_counter()
+                except Exception:
+                    if current_dev is not None:
+                        try:
+                            current_dev.close()
+                        except Exception:
+                            pass
+                        current_dev = None
+                    reconnect_device.wait(2.0)
                     continue
 
-                base_rgb = ripple_rgb(
-                    active_colors, d, max_distance, strength
-                )
-                rgb = scale_rgb(
-                    tuple(int(ch * v / 255.0) for ch in base_rgb),
-                    brightness_percent,
-                )
+            now = time.perf_counter()
 
-                if v > powers.get(idx, -1):
-                    powers[idx] = v
-                    colors[idx] = rgb
+            with settings_lock:
+                active_colors = enabled_colors(settings["colors"])
+                brightness_percent = settings["brightness"]
+                speed = settings["speed"]
+                life = settings["life"]
+                strength = settings["gradient_strength"]
 
-            # 剛按下的中心鍵固定使用「按下顏色」
-            if age < 0.24 and active_colors:
-                colors[center] = scale_rgb(active_colors[0], brightness_percent)
-                powers[center] = int(255 * brightness_percent / 100.0)
+            with lock:
+                ripples[:] = [r for r in ripples if now - r[1] < life]
+                active = list(ripples)
 
-        send_rgb(dev, colors)
+            # 每顆 LED 保存目前最強 ripple 的亮度與 RGB。
+            # 多個 ripple 相遇時採「亮度最大者」，避免顏色相加變白。
+            colors = {}
+            powers = {}
 
-        nxt += DT
-        delay = nxt - time.perf_counter()
-        if delay > 0:
-            time.sleep(delay)
-        else:
-            nxt = time.perf_counter()
+            for center, t0 in active:
+                age = now - t0
+                radius = age * speed
+                dist_map = DIST.get(center, {})
+                max_distance = max(dist_map.values(), default=1.0)
+
+                for idx, d in dist_map.items():
+                    v = brightness(d, radius, age, life)
+                    if v <= 0:
+                        continue
+
+                    base_rgb = ripple_rgb(
+                        active_colors, d, max_distance, strength
+                    )
+                    rgb = scale_rgb(
+                        tuple(int(ch * v / 255.0) for ch in base_rgb),
+                        brightness_percent,
+                    )
+
+                    if v > powers.get(idx, -1):
+                        powers[idx] = v
+                        colors[idx] = rgb
+
+                # 剛按下的中心鍵固定使用「按下顏色」
+                if age < 0.24 and active_colors:
+                    colors[center] = scale_rgb(active_colors[0], brightness_percent)
+                    powers[center] = int(255 * brightness_percent / 100.0)
+
+            try:
+                send_rgb(current_dev, colors)
+            except Exception:
+                try:
+                    current_dev.close()
+                except Exception:
+                    pass
+                current_dev = None
+                continue
+
+            nxt += DT
+            delay = nxt - time.perf_counter()
+            if delay > 0:
+                time.sleep(delay)
+            else:
+                nxt = time.perf_counter()
+    finally:
+        if current_dev is not None:
+            try:
+                send_rgb(current_dev, {})
+            except Exception:
+                pass
+            try:
+                current_dev.close()
+            except Exception:
+                pass
 
 # ---------------- Windows low-level keyboard hook ----------------
 
@@ -980,6 +1025,10 @@ WM_LBUTTONDBLCLK = 0x0203
 WM_RBUTTONUP = 0x0205
 WM_COMMAND = 0x0111
 WM_DESTROY = 0x0002
+WM_POWERBROADCAST = 0x0218
+PBT_APMRESUMECRITICAL = 0x0006
+PBT_APMRESUMESUSPEND = 0x0007
+PBT_APMRESUMEAUTOMATIC = 0x0012
 MF_STRING = 0x0000
 TPM_RIGHTBUTTON = 0x0002
 NIM_ADD = 0x00000000
@@ -1131,7 +1180,7 @@ class NativeTray:
                 return 0
             if event == WM_RBUTTONUP:
                 menu = user32.CreatePopupMenu()
-                user32.AppendMenuW(menu, MF_STRING, self.CMD_OPEN, "開啟 YG98 燈校控制器")
+                user32.AppendMenuW(menu, MF_STRING, self.CMD_OPEN, "開啟 YG98 燈效控制器")
                 user32.AppendMenuW(menu, MF_STRING, self.CMD_EXIT, "完全結束")
                 pt = wt.POINT()
                 user32.GetCursorPos(ctypes.byref(pt))
@@ -1146,6 +1195,15 @@ class NativeTray:
             elif cmd == self.CMD_EXIT:
                 self._exit_app()
             return 0
+        elif msg == WM_POWERBROADCAST:
+            if int(wparam) in (
+                PBT_APMRESUMECRITICAL,
+                PBT_APMRESUMESUSPEND,
+                PBT_APMRESUMEAUTOMATIC,
+            ):
+                # 休眠後舊 HID handle 可能仍存在但已無法控制鍵盤，強制重新枚舉。
+                reconnect_device.set()
+            return 1
         elif msg == WM_DESTROY:
             user32.PostQuitMessage(0)
             return 0
@@ -1163,7 +1221,7 @@ class NativeTray:
         atom = user32.RegisterClassW(ctypes.byref(wc))
         # 已註冊時 RegisterClassW 可能失敗，但 CreateWindowExW 仍可使用 class。
         self.hwnd = user32.CreateWindowExW(
-            0, class_name, "YG98 燈校控制器", 0,
+            0, class_name, "YG98 燈效控制器", 0,
             0, 0, 0, 0, None, None, hinst, None
         )
         if not self.hwnd:
@@ -1188,7 +1246,7 @@ class NativeTray:
         nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP
         nid.uCallbackMessage = WM_TRAYICON
         nid.hIcon = icon
-        nid.szTip = "YG98 燈校控制器"
+        nid.szTip = "YG98 燈效控制器"
         if not shell32.Shell_NotifyIconW(NIM_ADD, ctypes.byref(nid)):
             err = ctypes.get_last_error()
             print(f"[Tray] Shell_NotifyIconW failed: {err}")
@@ -1214,11 +1272,11 @@ def make_gui(device_info=None):
             root.iconbitmap(default=ICON_PATH)
     except Exception:
         pass
-    root.title("YG98 燈校控制器")
+    root.title("YG98 燈效控制器")
     root.geometry("500x750")
     root.resizable(False, False)
 
-    title = tk.Label(root, text="YG98 燈校控制器", font=("Microsoft JhengHei UI", 18, "bold"))
+    title = tk.Label(root, text="YG98 燈效控制器", font=("Microsoft JhengHei UI", 18, "bold"))
     title.pack(pady=(16, 3))
 
     mode_text = "RGB HID 已連線"
@@ -1462,17 +1520,17 @@ def make_gui(device_info=None):
 
     tk.Checkbutton(
         startup_frame,
-        text="Windows 登入後自動啟動 YG98 燈校控制器",
+        text="Windows 登入後自動啟動 YG98 燈效控制器",
         variable=startup_var,
         command=toggle_startup,
         font=("Microsoft JhengHei UI", 10)
     ).pack(anchor="w", padx=10, pady=8)
 
-    tk.Label(
-        startup_frame,
-        text="自動啟動時會用 pythonw 背景執行，不需要開 PowerShell。",
-        font=("Microsoft JhengHei UI", 9)
-    ).pack(anchor="w", padx=12, pady=(0, 8))
+    #tk.Label(
+    #    startup_frame,
+    #    text="自動啟動時會用 pythonw 背景執行，不需要開 PowerShell。",
+    #    font=("Microsoft JhengHei UI", 9)
+    #).pack(anchor="w", padx=12, pady=(0, 8))
 
     tk.Label(
         root,
@@ -1482,7 +1540,7 @@ def make_gui(device_info=None):
 
     tk.Label(
         root,
-        text="關閉視窗只會縮到右下角工具列｜雙擊圖示可再次開啟｜Ctrl + F12 完全結束",
+        text="雙擊圖示可再次開啟｜Ctrl + F12 完全結束",
         font=("Microsoft JhengHei UI", 9)
     ).pack()
 
@@ -1537,7 +1595,7 @@ def main():
                     pass
                 root.withdraw()
                 messagebox.showerror(
-                    "YG98 燈校控制器",
+                    "YG98 燈效控制器",
                     "目前找不到可控制 RGB 的 YG98/YG99 HID。\n\n"
                     "如果你現在是 2.4G 或藍牙模式，先切換模式後再試一次。\n\n"
                     f"{e}"
@@ -1593,14 +1651,10 @@ def main():
             root.mainloop()
         finally:
             running = False
+            reconnect_device.set()
             save_config()
-            render_thread.join(timeout=1.0)
+            render_thread.join(timeout=3.0)
             hook_thread.join(timeout=0.5)
-            try:
-                send_rgb(dev, {})
-            except Exception:
-                pass
-            dev.close()
 
     finally:
         if show_event:
