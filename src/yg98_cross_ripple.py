@@ -1131,7 +1131,7 @@ class NativeTray:
                 return 0
             if event == WM_RBUTTONUP:
                 menu = user32.CreatePopupMenu()
-                user32.AppendMenuW(menu, MF_STRING, self.CMD_OPEN, "開啟 YG98 十字漣漪")
+                user32.AppendMenuW(menu, MF_STRING, self.CMD_OPEN, "開啟 YG98 燈校控制器")
                 user32.AppendMenuW(menu, MF_STRING, self.CMD_EXIT, "完全結束")
                 pt = wt.POINT()
                 user32.GetCursorPos(ctypes.byref(pt))
@@ -1163,7 +1163,7 @@ class NativeTray:
         atom = user32.RegisterClassW(ctypes.byref(wc))
         # 已註冊時 RegisterClassW 可能失敗，但 CreateWindowExW 仍可使用 class。
         self.hwnd = user32.CreateWindowExW(
-            0, class_name, "YG98 Cross Ripple Tray", 0,
+            0, class_name, "YG98 燈校控制器", 0,
             0, 0, 0, 0, None, None, hinst, None
         )
         if not self.hwnd:
@@ -1188,7 +1188,7 @@ class NativeTray:
         nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP
         nid.uCallbackMessage = WM_TRAYICON
         nid.hIcon = icon
-        nid.szTip = "YG98 十字漣漪"
+        nid.szTip = "YG98 燈校控制器"
         if not shell32.Shell_NotifyIconW(NIM_ADD, ctypes.byref(nid)):
             err = ctypes.get_last_error()
             print(f"[Tray] Shell_NotifyIconW failed: {err}")
@@ -1214,11 +1214,11 @@ def make_gui(device_info=None):
             root.iconbitmap(default=ICON_PATH)
     except Exception:
         pass
-    root.title("YG98 燈效控制器 v3.4")
+    root.title("YG98 燈校控制器")
     root.geometry("500x750")
     root.resizable(False, False)
 
-    title = tk.Label(root, text="YG98 十字漣漪", font=("Microsoft JhengHei UI", 18, "bold"))
+    title = tk.Label(root, text="YG98 燈校控制器", font=("Microsoft JhengHei UI", 18, "bold"))
     title.pack(pady=(16, 3))
 
     mode_text = "RGB HID 已連線"
@@ -1462,7 +1462,7 @@ def make_gui(device_info=None):
 
     tk.Checkbutton(
         startup_frame,
-        text="Windows 登入後自動啟動十字漣漪",
+        text="Windows 登入後自動啟動 YG98 燈校控制器",
         variable=startup_var,
         command=toggle_startup,
         font=("Microsoft JhengHei UI", 10)
@@ -1537,7 +1537,7 @@ def main():
                     pass
                 root.withdraw()
                 messagebox.showerror(
-                    "YG98 十字漣漪",
+                    "YG98 燈校控制器",
                     "目前找不到可控制 RGB 的 YG98/YG99 HID。\n\n"
                     "如果你現在是 2.4G 或藍牙模式，先切換模式後再試一次。\n\n"
                     f"{e}"
