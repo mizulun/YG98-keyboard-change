@@ -215,6 +215,7 @@ DEFAULT_PROFILES = {
 
 profiles = {}
 current_profile = "粉紅 + 紫"
+startup_enabled = True
 
 
 def profile_from_settings():
@@ -242,6 +243,7 @@ def save_config():
     payload = {
         "current_profile": current_profile,
         "profiles": profiles,
+        "startup_enabled": startup_enabled,
     }
     tmp = CONFIG_FILE + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
@@ -250,7 +252,7 @@ def save_config():
 
 
 def load_config():
-    global profiles, current_profile
+    global profiles, current_profile, startup_enabled
     profiles = json.loads(json.dumps(DEFAULT_PROFILES))
     try:
         with open(CONFIG_FILE, "r", encoding="utf-8") as f:
@@ -258,6 +260,8 @@ def load_config():
         if isinstance(data.get("profiles"), dict):
             profiles.update(data["profiles"])
         current_profile = data.get("current_profile", current_profile)
+        # 舊版設定沒有這個欄位時，預設開啟 Windows 自動啟動。
+        startup_enabled = bool(data.get("startup_enabled", True))
     except (FileNotFoundError, json.JSONDecodeError, OSError):
         pass
     if current_profile not in profiles:
@@ -838,6 +842,48 @@ def rgb_to_hex(rgb):
 
 
 
+
+# ---------------- Single-instance / reopen existing GUI ----------------
+ERROR_ALREADY_EXISTS = 183
+WAIT_OBJECT_0 = 0x00000000
+EVENT_MODIFY_STATE = 0x0002
+
+MUTEX_NAME = r"Local\YG98CrossRipple.SingleInstance.v1"
+SHOW_EVENT_NAME = r"Local\YG98CrossRipple.ShowWindow.v1"
+
+kernel32.CreateMutexW.argtypes = [wt.LPVOID, wt.BOOL, wt.LPCWSTR]
+kernel32.CreateMutexW.restype = wt.HANDLE
+kernel32.CreateEventW.argtypes = [wt.LPVOID, wt.BOOL, wt.BOOL, wt.LPCWSTR]
+kernel32.CreateEventW.restype = wt.HANDLE
+kernel32.OpenEventW.argtypes = [wt.DWORD, wt.BOOL, wt.LPCWSTR]
+kernel32.OpenEventW.restype = wt.HANDLE
+kernel32.SetEvent.argtypes = [wt.HANDLE]
+kernel32.SetEvent.restype = wt.BOOL
+kernel32.WaitForSingleObject.argtypes = [wt.HANDLE, wt.DWORD]
+kernel32.WaitForSingleObject.restype = wt.DWORD
+kernel32.CloseHandle.argtypes = [wt.HANDLE]
+kernel32.CloseHandle.restype = wt.BOOL
+
+def acquire_single_instance():
+    """Return (is_primary, mutex_handle, show_event_handle)."""
+    ctypes.set_last_error(0)
+    mutex = kernel32.CreateMutexW(None, False, MUTEX_NAME)
+    if not mutex:
+        return True, None, None
+
+    already_running = (ctypes.get_last_error() == ERROR_ALREADY_EXISTS)
+    if already_running:
+        evt = kernel32.OpenEventW(EVENT_MODIFY_STATE, False, SHOW_EVENT_NAME)
+        if evt:
+            kernel32.SetEvent(evt)
+            kernel32.CloseHandle(evt)
+        kernel32.CloseHandle(mutex)
+        return False, None, None
+
+    show_event = kernel32.CreateEventW(None, False, False, SHOW_EVENT_NAME)
+    return True, mutex, show_event
+
+
 # ---------------- Windows notification-area / system-tray icon ----------------
 # 使用原生 Shell_NotifyIconW，不需要額外安裝 pystray。
 shell32 = ctypes.WinDLL("shell32", use_last_error=True)
@@ -1074,7 +1120,7 @@ class NativeTray:
 
 
 def make_gui(device_info=None):
-    global current_profile
+    global current_profile, startup_enabled
 
     root = tk.Tk()
     try:
@@ -1082,7 +1128,7 @@ def make_gui(device_info=None):
             root.iconbitmap(default=ICON_PATH)
     except Exception:
         pass
-    root.title("YG98 十字漣漪控制器 v3.2")
+    root.title("YG98 燈效控制器 v3.3")
     root.geometry("470x610")
     root.resizable(False, False)
 
@@ -1233,13 +1279,18 @@ def make_gui(device_info=None):
     startup_frame = tk.LabelFrame(root, text="自動啟動", font=("Microsoft JhengHei UI", 10, "bold"))
     startup_frame.pack(fill="x", padx=24, pady=(14, 8))
 
-    startup_var = tk.BooleanVar(value=is_startup_enabled())
+    startup_var = tk.BooleanVar(value=startup_enabled and is_startup_enabled())
 
     def toggle_startup():
+        global startup_enabled
         try:
-            set_startup(startup_var.get())
+            startup_enabled = bool(startup_var.get())
+            set_startup(startup_enabled)
+            save_config()
         except OSError as e:
             startup_var.set(is_startup_enabled())
+            startup_enabled = bool(startup_var.get())
+            save_config()
             messagebox.showerror("設定失敗", str(e), parent=root)
 
     tk.Checkbutton(
@@ -1279,70 +1330,116 @@ def make_gui(device_info=None):
 def main():
     global running
 
-    load_config()
-
-    try:
-        dev, device_info = open_dev()
-    except Exception as e:
-        # 一般手動啟動要看到錯誤；開機背景啟動則安靜退出。
-        if "--startup" not in sys.argv:
-            root = tk.Tk()
-            try:
-                if os.path.exists(ICON_PATH):
-                    root.iconbitmap(default=ICON_PATH)
-            except Exception:
-                pass
-            root.withdraw()
-            messagebox.showerror(
-                "YG98 十字漣漪",
-                "目前找不到可控制 RGB 的 YG98/YG99 HID。\n\n"
-                "如果你現在是 2.4G 或藍牙模式，先切換模式後再試一次。\n\n"
-                f"{e}"
-            )
-            root.destroy()
+    is_primary, mutex_handle, show_event = acquire_single_instance()
+    if not is_primary:
+        # 已經有一份程式在背景執行：通知原本那份把 GUI 打開，自己立刻結束。
         return
 
-    send_rgb(dev, {})
+    try:
+        load_config()
 
-    render_thread = threading.Thread(target=renderer, args=(dev,), daemon=True)
-    render_thread.start()
+        # 每次啟動都依照設定同步 Registry。
+        # 舊版沒有 startup_enabled 設定時預設為 True，所以升級後會自動補上開機自啟。
+        try:
+            set_startup(startup_enabled)
+        except OSError:
+            pass
 
-    hook_thread = threading.Thread(target=keyboard_hook_loop, daemon=True)
-    hook_thread.start()
+        dev = None
+        device_info = None
 
-    root = make_gui(device_info)
-
-    # 常駐 Windows 右下角通知區。
-    tray = NativeTray(root)
-    tray.start()
-
-    # 開機自啟時完全隱藏 GUI，只留通知區圖示。
-    if "--startup" in sys.argv:
-        root.after(100, root.withdraw)
-
-    def poll_running():
-        if not running:
+        # Windows 登入時 HID 常比程式晚幾秒出現。
+        # 舊版只試一次，找不到就直接退出，這就是重開機後效果沒啟動的主要原因。
+        if "--startup" in sys.argv:
+            deadline = time.monotonic() + 90.0
+            while running and time.monotonic() < deadline:
+                try:
+                    dev, device_info = open_dev()
+                    break
+                except Exception:
+                    time.sleep(2.0)
+        else:
             try:
+                dev, device_info = open_dev()
+            except Exception as e:
+                root = tk.Tk()
+                try:
+                    if os.path.exists(ICON_PATH):
+                        root.iconbitmap(default=ICON_PATH)
+                except Exception:
+                    pass
+                root.withdraw()
+                messagebox.showerror(
+                    "YG98 十字漣漪",
+                    "目前找不到可控制 RGB 的 YG98/YG99 HID。\n\n"
+                    "如果你現在是 2.4G 或藍牙模式，先切換模式後再試一次。\n\n"
+                    f"{e}"
+                )
                 root.destroy()
-            except Exception:
-                pass
+                return
+
+        # 開機 90 秒內仍找不到鍵盤就安靜結束；下次手動開啟仍可使用。
+        if dev is None:
             return
+
+        send_rgb(dev, {})
+
+        render_thread = threading.Thread(target=renderer, args=(dev,), daemon=True)
+        render_thread.start()
+
+        hook_thread = threading.Thread(target=keyboard_hook_loop, daemon=True)
+        hook_thread.start()
+
+        root = make_gui(device_info)
+
+        tray = NativeTray(root)
+        tray.start()
+
+        if "--startup" in sys.argv:
+            root.after(100, root.withdraw)
+
+        def show_existing_if_requested():
+            if show_event and kernel32.WaitForSingleObject(show_event, 0) == WAIT_OBJECT_0:
+                try:
+                    root.deiconify()
+                    root.state("normal")
+                    root.lift()
+                    root.focus_force()
+                except Exception:
+                    pass
+            if running:
+                root.after(150, show_existing_if_requested)
+
+        def poll_running():
+            if not running:
+                try:
+                    root.destroy()
+                except Exception:
+                    pass
+                return
+            root.after(100, poll_running)
+
+        root.after(150, show_existing_if_requested)
         root.after(100, poll_running)
 
-    root.after(100, poll_running)
-
-    try:
-        root.mainloop()
-    finally:
-        running = False
-        save_config()
-        render_thread.join(timeout=1.0)
-        hook_thread.join(timeout=0.5)
         try:
-            send_rgb(dev, {})
-        except Exception:
-            pass
-        dev.close()
+            root.mainloop()
+        finally:
+            running = False
+            save_config()
+            render_thread.join(timeout=1.0)
+            hook_thread.join(timeout=0.5)
+            try:
+                send_rgb(dev, {})
+            except Exception:
+                pass
+            dev.close()
+
+    finally:
+        if show_event:
+            kernel32.CloseHandle(show_event)
+        if mutex_handle:
+            kernel32.CloseHandle(mutex_handle)
 
 if __name__ == "__main__":
     main()
