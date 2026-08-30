@@ -2,17 +2,18 @@
 
 A Windows RGB utility for the YG98/YG99 3-mode keyboard family.
 
-The project implements a host-driven **cross-ripple RGB effect**: pressing a key creates a horizontal and vertical ripple. The center and outer ripple colors can be configured independently and blended with a smooth gradient.
+The project implements a host-driven **cross-ripple RGB effect**: pressing a key creates a horizontal and vertical ripple. Each profile can contain any number of colors, blended from the pressed key toward the outer edge.
 
 > Status: early public release. The current physical LED mapping and special ripple paths were calibrated on one YG98 3M keyboard. Other firmware revisions / layouts may require additional device profiles.
 
 ## Features
 
 - Multi-key cross ripples
-- Smooth center-color -> outer-color RGB gradient
+- Smooth multi-color gradient from the pressed key to the outer edge
+- Add, remove, reorder, enable, or temporarily disable profile colors
 - Multiple color profiles
 - Automatically remembers the last profile/settings
-- Adjustable ripple speed, lifetime and gradient curve
+- Adjustable ripple speed, lifetime, gradient curve, and 0–100% brightness
 - Windows notification-area (system tray) resident mode
 - Closing the GUI keeps the RGB engine running
 - Double-click the tray icon to reopen the GUI
@@ -73,5 +74,4 @@ No open-source license has been selected yet.
  1. 亮度
  2. icon
  3. 加入別種特效(擴散:可自定義顏色)
- 4. 目前每組合僅雙色，後續預計新增每組合可自由選要幾種顏色
- 5. 2.4G、Bluetooth
+ 4. 2.4G、Bluetooth

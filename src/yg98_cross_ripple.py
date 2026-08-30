@@ -40,8 +40,11 @@ DT = 1.0 / FPS
 # GUI 可即時調整
 settings_lock = threading.Lock()
 settings = {
-    "press_color": (255, 70, 170),   # 粉紅
-    "outer_color": (145, 55, 255),   # 紫
+    "colors": [
+        {"rgb": (255, 70, 170), "enabled": True},   # 粉紅
+        {"rgb": (145, 55, 255), "enabled": True},   # 紫
+    ],
+    "brightness": 100.0,
     "speed": 8.5,
     "life": 1.05,
     "gradient_strength": 0.72,
@@ -191,22 +194,31 @@ RUN_NAME = "YG98CrossRipple"
 
 DEFAULT_PROFILES = {
     "粉紅 + 紫": {
-        "press_color": [255, 70, 170],
-        "outer_color": [145, 55, 255],
+        "colors": [
+            {"rgb": [255, 70, 170], "enabled": True},
+            {"rgb": [145, 55, 255], "enabled": True},
+        ],
+        "brightness": 100.0,
         "speed": 8.5,
         "life": 1.05,
         "gradient_strength": 0.72,
     },
     "藍 + 綠": {
-        "press_color": [45, 130, 255],
-        "outer_color": [40, 230, 130],
+        "colors": [
+            {"rgb": [45, 130, 255], "enabled": True},
+            {"rgb": [40, 230, 130], "enabled": True},
+        ],
+        "brightness": 100.0,
         "speed": 8.5,
         "life": 1.05,
         "gradient_strength": 0.72,
     },
     "紅 + 橘": {
-        "press_color": [255, 45, 55],
-        "outer_color": [255, 145, 25],
+        "colors": [
+            {"rgb": [255, 45, 55], "enabled": True},
+            {"rgb": [255, 145, 25], "enabled": True},
+        ],
+        "brightness": 100.0,
         "speed": 8.5,
         "life": 1.05,
         "gradient_strength": 0.72,
@@ -218,11 +230,62 @@ current_profile = "粉紅 + 紫"
 startup_enabled = True
 
 
+def normalize_rgb(value, fallback=(255, 255, 255)):
+    if not isinstance(value, (list, tuple)) or len(value) != 3:
+        value = fallback
+    try:
+        return tuple(max(0, min(255, int(round(float(channel))))) for channel in value)
+    except (TypeError, ValueError):
+        return tuple(fallback)
+
+
+def normalize_profile(data):
+    """Return current profile schema, including migration from the old two-color format."""
+    if not isinstance(data, dict):
+        data = {}
+
+    raw_colors = data.get("colors")
+    colors = []
+    if isinstance(raw_colors, list):
+        for item in raw_colors:
+            if not isinstance(item, dict):
+                continue
+            colors.append({
+                "rgb": list(normalize_rgb(item.get("rgb"))),
+                "enabled": bool(item.get("enabled", True)),
+            })
+
+    if not colors:
+        colors = [
+            {"rgb": list(normalize_rgb(data.get("press_color"), (255, 70, 170))), "enabled": True},
+            {"rgb": list(normalize_rgb(data.get("outer_color"), (145, 55, 255))), "enabled": True},
+        ]
+    if not any(item["enabled"] for item in colors):
+        colors[0]["enabled"] = True
+
+    def number(key, default, lo, hi):
+        try:
+            return max(lo, min(hi, float(data.get(key, default))))
+        except (TypeError, ValueError):
+            return default
+
+    return {
+        "colors": colors,
+        "brightness": number("brightness", 100.0, 0.0, 100.0),
+        "speed": number("speed", 8.5, 4.0, 14.0),
+        "life": number("life", 1.05, 0.6, 1.8),
+        "gradient_strength": number("gradient_strength", 0.72, 0.35, 1.4),
+    }
+
+
 def profile_from_settings():
     with settings_lock:
         return {
-            "press_color": list(settings["press_color"]),
-            "outer_color": list(settings["outer_color"]),
+            "colors": [
+                {"rgb": list(item["rgb"]), "enabled": bool(item["enabled"])}
+                for item in settings["colors"]
+            ],
+            "brightness": float(settings["brightness"]),
             "speed": float(settings["speed"]),
             "life": float(settings["life"]),
             "gradient_strength": float(settings["gradient_strength"]),
@@ -230,12 +293,16 @@ def profile_from_settings():
 
 
 def apply_profile_data(data):
+    data = normalize_profile(data)
     with settings_lock:
-        settings["press_color"] = tuple(data.get("press_color", [255, 70, 170]))
-        settings["outer_color"] = tuple(data.get("outer_color", [145, 55, 255]))
-        settings["speed"] = float(data.get("speed", 8.5))
-        settings["life"] = float(data.get("life", 1.05))
-        settings["gradient_strength"] = float(data.get("gradient_strength", 0.72))
+        settings["colors"] = [
+            {"rgb": tuple(item["rgb"]), "enabled": item["enabled"]}
+            for item in data["colors"]
+        ]
+        settings["brightness"] = data["brightness"]
+        settings["speed"] = data["speed"]
+        settings["life"] = data["life"]
+        settings["gradient_strength"] = data["gradient_strength"]
 
 
 def save_config():
@@ -266,6 +333,7 @@ def load_config():
         pass
     if current_profile not in profiles:
         current_profile = next(iter(profiles))
+    profiles = {name: normalize_profile(profile) for name, profile in profiles.items()}
     apply_profile_data(profiles[current_profile])
 
 
@@ -637,18 +705,33 @@ def mix_color(a, b, t):
     return tuple(int(a[i] + (b[i] - a[i]) * t) for i in range(3))
 
 
-def ripple_rgb(press_color, outer_color, distance, max_distance, strength):
+def ripple_rgb(colors, distance, max_distance, strength):
     """
-    空間漸變：按鍵中心保持 press_color，距離越遠越接近 outer_color。
+    空間漸變：顏色清單從按鍵中心依序延伸到最外圈。
     strength < 1 時，前幾格仍保留較多中心色，過渡更柔和。
     """
+    if not colors:
+        return (0, 0, 0)
+    if len(colors) == 1:
+        return colors[0]
     if max_distance <= 0:
-        return press_color
+        return colors[0]
     x = max(0.0, min(1.0, distance / max_distance))
     # smoothstep，避免線性漸變看起來像一格一格換色
     x = x * x * (3.0 - 2.0 * x)
     x = x ** max(0.25, strength)
-    return mix_color(press_color, outer_color, x)
+    position = x * (len(colors) - 1)
+    left = min(int(position), len(colors) - 2)
+    return mix_color(colors[left], colors[left + 1], position - left)
+
+
+def scale_rgb(rgb, brightness_percent):
+    factor = max(0.0, min(100.0, float(brightness_percent))) / 100.0
+    return tuple(max(0, min(255, int(channel * factor))) for channel in rgb)
+
+
+def enabled_colors(color_items):
+    return [tuple(item["rgb"]) for item in color_items if item.get("enabled", True)]
 
 def renderer(dev):
     global running
@@ -658,8 +741,8 @@ def renderer(dev):
         now = time.perf_counter()
 
         with settings_lock:
-            press_color = settings["press_color"]
-            outer_color = settings["outer_color"]
+            active_colors = enabled_colors(settings["colors"])
+            brightness_percent = settings["brightness"]
             speed = settings["speed"]
             life = settings["life"]
             strength = settings["gradient_strength"]
@@ -685,18 +768,21 @@ def renderer(dev):
                     continue
 
                 base_rgb = ripple_rgb(
-                    press_color, outer_color, d, max_distance, strength
+                    active_colors, d, max_distance, strength
                 )
-                rgb = tuple(int(ch * v / 255.0) for ch in base_rgb)
+                rgb = scale_rgb(
+                    tuple(int(ch * v / 255.0) for ch in base_rgb),
+                    brightness_percent,
+                )
 
                 if v > powers.get(idx, -1):
                     powers[idx] = v
                     colors[idx] = rgb
 
             # 剛按下的中心鍵固定使用「按下顏色」
-            if age < 0.24:
-                colors[center] = press_color
-                powers[center] = 255
+            if age < 0.24 and active_colors:
+                colors[center] = scale_rgb(active_colors[0], brightness_percent)
+                powers[center] = int(255 * brightness_percent / 100.0)
 
         send_rgb(dev, colors)
 
@@ -1128,8 +1214,8 @@ def make_gui(device_info=None):
             root.iconbitmap(default=ICON_PATH)
     except Exception:
         pass
-    root.title("YG98 燈效控制器 v3.3")
-    root.geometry("470x610")
+    root.title("YG98 燈效控制器 v3.4")
+    root.geometry("500x750")
     root.resizable(False, False)
 
     title = tk.Label(root, text="YG98 十字漣漪", font=("Microsoft JhengHei UI", 18, "bold"))
@@ -1149,19 +1235,128 @@ def make_gui(device_info=None):
     profile_menu.config(width=24)
     profile_menu.pack(side="left", padx=8, pady=10)
 
-    color_frame = tk.Frame(root)
-    color_frame.pack(fill="x", padx=28)
+    color_box = tk.LabelFrame(root, text="漸變顏色（中心 → 外圈）",
+                              font=("Microsoft JhengHei UI", 10, "bold"))
+    color_box.pack(fill="x", padx=24)
+    color_canvas = tk.Canvas(color_box, height=180, highlightthickness=0)
+    color_scrollbar = tk.Scrollbar(color_box, orient="vertical", command=color_canvas.yview)
+    color_frame = tk.Frame(color_canvas)
+    color_window = color_canvas.create_window((0, 0), window=color_frame, anchor="nw")
+    color_canvas.configure(yscrollcommand=color_scrollbar.set)
+    color_canvas.pack(side="left", fill="both", expand=True, padx=(6, 0), pady=6)
+    color_scrollbar.pack(side="right", fill="y", padx=(0, 6), pady=6)
+    color_frame.bind(
+        "<Configure>",
+        lambda _event: color_canvas.configure(scrollregion=color_canvas.bbox("all")),
+    )
+    color_canvas.bind(
+        "<Configure>",
+        lambda event: color_canvas.itemconfigure(color_window, width=event.width),
+    )
 
-    previews = {}
     sliders = {}
+
+    def persist_current_profile():
+        profiles[current_profile] = profile_from_settings()
+        save_config()
+
+    def rebuild_color_rows():
+        for child in color_frame.winfo_children():
+            child.destroy()
+        with settings_lock:
+            color_items = [
+                {"rgb": tuple(item["rgb"]), "enabled": item["enabled"]}
+                for item in settings["colors"]
+            ]
+
+        for index, item in enumerate(color_items):
+            row = tk.Frame(color_frame)
+            row.pack(fill="x", pady=3)
+            enabled_var = tk.BooleanVar(value=item["enabled"])
+            label = "中心" if index == 0 else ("外圈" if index == len(color_items) - 1 else f"顏色 {index + 1}")
+            tk.Checkbutton(
+                row, variable=enabled_var, width=2,
+                command=lambda i=index, var=enabled_var: toggle_color(i, var.get()),
+            ).pack(side="left")
+            tk.Label(row, text=label, width=7, anchor="w").pack(side="left")
+            preview = tk.Label(row, width=6, height=1, bg=rgb_to_hex(item["rgb"]),
+                               relief="solid", bd=1)
+            preview.pack(side="left", padx=4)
+            tk.Button(row, text="選色", width=5,
+                      command=lambda i=index: choose_color(i)).pack(side="left", padx=2)
+            tk.Button(row, text="↑", width=3, state="disabled" if index == 0 else "normal",
+                      command=lambda i=index: move_color(i, -1)).pack(side="left", padx=1)
+            tk.Button(row, text="↓", width=3,
+                      state="disabled" if index == len(color_items) - 1 else "normal",
+                      command=lambda i=index: move_color(i, 1)).pack(side="left", padx=1)
+            tk.Button(row, text="刪除", width=5,
+                      command=lambda i=index: delete_color(i)).pack(side="right", padx=4)
+
+        color_frame.update_idletasks()
+        color_canvas.configure(scrollregion=color_canvas.bbox("all"))
+
+    def choose_color(index):
+        with settings_lock:
+            current = settings["colors"][index]["rgb"]
+        chosen = colorchooser.askcolor(color=rgb_to_hex(current), parent=root)
+        if chosen and chosen[0]:
+            rgb = tuple(int(round(value)) for value in chosen[0])
+            with settings_lock:
+                settings["colors"][index]["rgb"] = rgb
+            persist_current_profile()
+            rebuild_color_rows()
+
+    def toggle_color(index, enabled):
+        with settings_lock:
+            if not enabled and sum(item["enabled"] for item in settings["colors"]) <= 1:
+                allowed = False
+            else:
+                settings["colors"][index]["enabled"] = bool(enabled)
+                allowed = True
+        if not allowed:
+            messagebox.showinfo("至少一個顏色", "每個組合至少要啟用一個顏色。", parent=root)
+            rebuild_color_rows()
+            return
+        persist_current_profile()
+
+    def move_color(index, offset):
+        target = index + offset
+        with settings_lock:
+            color_items = settings["colors"]
+            if not (0 <= target < len(color_items)):
+                return
+            color_items[index], color_items[target] = color_items[target], color_items[index]
+        persist_current_profile()
+        rebuild_color_rows()
+
+    def delete_color(index):
+        with settings_lock:
+            color_items = settings["colors"]
+            enabled_count = sum(item["enabled"] for item in color_items)
+            if len(color_items) <= 1:
+                reason = "每個組合至少要保留一個顏色。"
+            elif color_items[index]["enabled"] and enabled_count <= 1:
+                reason = "無法刪除唯一啟用的顏色，請先啟用另一個顏色。"
+            else:
+                color_items.pop(index)
+                reason = None
+        if reason:
+            messagebox.showinfo("無法刪除", reason, parent=root)
+            return
+        persist_current_profile()
+        rebuild_color_rows()
+
+    def add_color():
+        with settings_lock:
+            settings["colors"].append({"rgb": (255, 255, 255), "enabled": True})
+        persist_current_profile()
+        rebuild_color_rows()
+        color_canvas.yview_moveto(1.0)
 
     def refresh_controls():
         with settings_lock:
-            pc = settings["press_color"]
-            oc = settings["outer_color"]
-            vals = {k: settings[k] for k in ("speed", "life", "gradient_strength")}
-        previews["press_color"].config(bg=rgb_to_hex(pc))
-        previews["outer_color"].config(bg=rgb_to_hex(oc))
+            vals = {k: settings[k] for k in ("speed", "life", "gradient_strength", "brightness")}
+        rebuild_color_rows()
         for k, v in vals.items():
             sliders[k].set(v)
 
@@ -1177,35 +1372,7 @@ def make_gui(device_info=None):
 
     profile_var.trace_add("write", select_profile)
 
-    def choose_color(which, preview):
-        with settings_lock:
-            current = settings[which]
-        chosen = colorchooser.askcolor(color=rgb_to_hex(current), parent=root)
-        if chosen and chosen[0]:
-            rgb = tuple(int(round(v)) for v in chosen[0])
-            with settings_lock:
-                settings[which] = rgb
-            preview.config(bg=rgb_to_hex(rgb))
-            # 任何修改都立即寫回目前組合，因此下次開機就是最後狀態。
-            profiles[current_profile] = profile_from_settings()
-            save_config()
-
-    def color_row(label_text, which):
-        row = tk.Frame(color_frame)
-        row.pack(fill="x", pady=6)
-        tk.Label(row, text=label_text, width=12, anchor="w",
-                 font=("Microsoft JhengHei UI", 11)).pack(side="left")
-        with settings_lock:
-            initial = settings[which]
-        preview = tk.Label(row, width=8, height=2, bg=rgb_to_hex(initial),
-                           relief="solid", bd=1)
-        preview.pack(side="left", padx=8)
-        previews[which] = preview
-        tk.Button(row, text="選擇顏色", command=lambda: choose_color(which, preview),
-                  width=12).pack(side="right")
-
-    color_row("按下顏色", "press_color")
-    color_row("外圈顏色", "outer_color")
+    tk.Button(root, text="＋ 新增顏色", command=add_color, width=14).pack(pady=(6, 0))
 
     control = tk.Frame(root)
     control.pack(fill="x", padx=28, pady=(8, 0))
@@ -1227,13 +1394,13 @@ def make_gui(device_info=None):
         def update(_=None):
             with settings_lock:
                 settings[key] = float(var.get())
-            profiles[current_profile] = profile_from_settings()
-            save_config()
+            persist_current_profile()
         scale.configure(command=update)
 
     add_slider("擴散速度", "speed", 4.0, 14.0, 0.5)
     add_slider("殘影時間", "life", 0.6, 1.8, 0.05)
     add_slider("漸變曲線", "gradient_strength", 0.35, 1.4, 0.05)
+    add_slider("整體亮度 (%)", "brightness", 0.0, 100.0, 1.0)
 
     def rebuild_menu():
         menu = profile_menu["menu"]
